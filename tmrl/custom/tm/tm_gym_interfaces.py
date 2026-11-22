@@ -37,6 +37,7 @@ class TM2020Interface(RealTimeGymInterface):
                  img_hist_len: int = 4,
                  gamepad: bool = True,
                  save_replays: bool = False,
+                 save_replay_interval_minutes: float = 0.0,
                  grayscale: bool = True,
                  resize_to=(64, 64)):
         """
@@ -46,6 +47,7 @@ class TM2020Interface(RealTimeGymInterface):
             img_hist_len: int: history of images that are part of observations
             gamepad: bool: whether to use a virtual gamepad for control
             save_replays: bool: whether to save TrackMania replays on successful episodes
+            save_replay_interval_minutes: float: if > 0, save a replay at most once per interval, including on reset
             grayscale: bool: whether to output grayscale images or color images
             resize_to: Tuple[int, int]: resize output images to this (width, height)
         """
@@ -60,6 +62,8 @@ class TM2020Interface(RealTimeGymInterface):
         self.window_interface = None
         self.small_window = None
         self.save_replays = save_replays
+        self.save_replay_interval_minutes = float(save_replay_interval_minutes) if save_replay_interval_minutes is not None else 0.0
+        self.last_replay_save = time.time()
         self.grayscale = grayscale
         self.resize_to = resize_to
         self.finish_reward = cfg.REWARD_CONFIG['END_OF_TRACK']
@@ -208,6 +212,15 @@ class TM2020Interface(RealTimeGymInterface):
     def reset_common(self):
         if not self.initialized:
             self.initialize()
+        if self.save_replays and self.save_replay_interval_minutes > 0.0:
+            now = time.time()
+            if now - self.last_replay_save >= self.save_replay_interval_minutes * 60.0:
+                try:
+                    save_ghost()
+                    self.last_replay_save = now
+                    time.sleep(1.0)
+                except Exception as e:
+                    logging.warning(f"Could not save replay: {e}")
         self.send_control(self.get_default_action())
         self.reset_race()
         time_sleep = max(0, cfg.SLEEP_TIME_AT_RESET - 0.1) if self.gamepad else cfg.SLEEP_TIME_AT_RESET
@@ -247,7 +260,7 @@ class TM2020Interface(RealTimeGymInterface):
         The agent stays 'paused', waiting in position
         """
         self.send_control(self.get_default_action())
-        if self.save_replays:
+        if self.save_replays and self.save_replay_interval_minutes <= 0.0:
             save_ghost()
             time.sleep(1.0)
         self.reset_race()
@@ -389,8 +402,8 @@ class TM2020InterfaceImagesProgress(TM2020Interface):
 
 
 class TM2020InterfaceLidar(TM2020Interface):
-    def __init__(self, img_hist_len=1, gamepad=False, save_replays: bool = False):
-        super().__init__(img_hist_len, gamepad, save_replays)
+    def __init__(self, img_hist_len=1, gamepad=False, save_replays: bool = False, save_replay_interval_minutes: float = 0.0):
+        super().__init__(img_hist_len=img_hist_len, gamepad=gamepad, save_replays=save_replays, save_replay_interval_minutes=save_replay_interval_minutes)
         self.window_interface = None
         self.lidar = None
 
