@@ -9,11 +9,12 @@ import rtgym
 # local imports
 import tmrl.config.config_constants as cfg
 from tmrl.training_offline import TorchTrainingOffline
-from tmrl.custom.tm.tm_gym_interfaces import TM2020Interface, TM2020InterfaceLidar, TM2020InterfaceLidarProgress
-from tmrl.custom.custom_memories import MemoryTMFull, MemoryTMLidar, MemoryTMLidarProgress, get_local_buffer_sample_lidar, get_local_buffer_sample_lidar_progress, get_local_buffer_sample_tm20_imgs
-from tmrl.custom.tm.tm_preprocessors import obs_preprocessor_tm_act_in_obs, obs_preprocessor_tm_lidar_act_in_obs, obs_preprocessor_tm_lidar_progress_act_in_obs
+from tmrl.custom.tm.tm_gym_interfaces import TM2020Interface, TM2020InterfaceImagesProgress, TM2020InterfaceLidar, TM2020InterfaceLidarProgress
+from tmrl.custom.custom_memories import MemoryTMFull, MemoryTMFullProgress, MemoryTMLidar, MemoryTMLidarProgress, get_local_buffer_sample_lidar, get_local_buffer_sample_lidar_progress, get_local_buffer_sample_tm20_imgs, get_local_buffer_sample_tm20_imgs_progress
+from tmrl.custom.tm.tm_preprocessors import obs_preprocessor_tm_act_in_obs, obs_preprocessor_tm_images_progress_act_in_obs, obs_preprocessor_tm_lidar_act_in_obs, obs_preprocessor_tm_lidar_progress_act_in_obs
 from tmrl.envs import GenericGymEnv
 from tmrl.custom.custom_models import SquashedGaussianMLPActor, MLPActorCritic, REDQMLPActorCritic, RNNActorCritic, SquashedGaussianRNNActor, SquashedGaussianVanillaCNNActor, VanillaCNNActorCritic, SquashedGaussianVanillaColorCNNActor, VanillaColorCNNActorCritic
+from tmrl.custom.custom_models import SquashedGaussianImageProgressActor, ImageProgressActorCritic
 from tmrl.custom.custom_models import LateFusionActorCritic, SquashedGaussianLateFusionActor
 from tmrl.custom.custom_algorithms import SpinupSacAgent as SAC_Agent
 from tmrl.custom.custom_algorithms import REDQSACAgent as REDQ_Agent
@@ -38,12 +39,14 @@ MODELS_LIDAR_PROGRESS = {
     "mlp": (MLPActorCritic if ALG_NAME == "SAC" else REDQMLPActorCritic, SquashedGaussianMLPActor),
     "latefusion": (LateFusionActorCritic, SquashedGaussianLateFusionActor),
 }
+IMAGE_MODEL_NAME = "cnn_gru_progress"
 
 # Étiquettes du logger CSV. Phase : "train" (par défaut) ou "eval" -> avant de lancer le worker d'évaluation :
 #   PowerShell :  $env:TMRL_LOG_PHASE = "eval"
 LOG_RUN_NAME = str(getattr(cfg, "RUN_NAME", MODEL_NAME))
 LOG_PHASE = os.environ.get("TMRL_LOG_PHASE", "train")
-print(f"[CONFIG] MODEL_NAME={MODEL_NAME} | RUN_NAME={LOG_RUN_NAME} | LOG_PHASE={LOG_PHASE}", flush=True)
+_MODEL_LABEL = IMAGE_MODEL_NAME if cfg.PRAGMA_IMAGE_PROGRESS else MODEL_NAME
+print(f"[CONFIG] MODEL_NAME={_MODEL_LABEL} | RUN_NAME={LOG_RUN_NAME} | LOG_PHASE={LOG_PHASE}", flush=True)
 
 
 # LOGGER CSV (steps.csv + episodes.csv dans TmrlData/benchmark) : =====================
@@ -52,13 +55,14 @@ print(f"[CONFIG] MODEL_NAME={MODEL_NAME} | RUN_NAME={LOG_RUN_NAME} | LOG_PHASE={
 # send_control() mémorise l'action envoyée ; get_obs_rew_terminated_info() renvoie obs / reward / terminated -> 1 ligne CSV.
 
 class LoggingInterfaceMixin:
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, progress_index=1, **kwargs):
         super().__init__(*args, **kwargs)
         self._recorder = EpisodeRecorder(
             folder=os.path.join(str(cfg.TMRL_FOLDER), "benchmark"),
             run_name=LOG_RUN_NAME,
             phase=LOG_PHASE,
-            time_step=cfg.ENV_CONFIG["RTGYM_CONFIG"].get("time_step_duration", 0.05))
+            time_step=cfg.ENV_CONFIG["RTGYM_CONFIG"].get("time_step_duration", 0.05),
+            progress_index=progress_index)
         self._last_control = None
         print(f"[LOGGER] interface avec log CSV instanciée (pid={os.getpid()})", flush=True)
 
@@ -71,7 +75,7 @@ class LoggingInterfaceMixin:
         return super().send_control(control)
 
     def _log(self, res):
-        self._recorder.on_step(res[0], self._last_control, res[1], res[2], False)
+        self._recorder.on_step(res[0], self._last_control, res[1], res[2], False, res[3])
         return res
 
     # selon la version de rtgym, la méthode s'appelle l'une ou l'autre (une seule est appelée)
@@ -80,6 +84,10 @@ class LoggingInterfaceMixin:
 
     def get_obs_rew_done_info(self):
         return self._log(super().get_obs_rew_done_info())
+
+
+class LoggedInterfaceImagesProgress(LoggingInterfaceMixin, TM2020InterfaceImagesProgress):
+    pass
 
 
 class LoggedInterfaceLidar(LoggingInterfaceMixin, TM2020InterfaceLidar):
@@ -103,6 +111,11 @@ if cfg.PRAGMA_LIDAR:
     else:
         TRAIN_MODEL = MLPActorCritic if ALG_NAME == "SAC" else REDQMLPActorCritic
         POLICY = SquashedGaussianMLPActor
+elif cfg.PRAGMA_IMAGE_PROGRESS:
+    assert not cfg.PRAGMA_RNN, "RNNs not supported yet"
+    assert ALG_NAME == "SAC", f"{ALG_NAME} is not implemented here."
+    TRAIN_MODEL = ImageProgressActorCritic
+    POLICY = SquashedGaussianImageProgressActor
 else:
     assert not cfg.PRAGMA_RNN, "RNNs not supported yet"
     assert ALG_NAME == "SAC", f"{ALG_NAME} is not implemented here."
@@ -114,6 +127,13 @@ if cfg.PRAGMA_LIDAR:
         INT = partial(LoggedInterfaceLidarProgress, img_hist_len=cfg.IMG_HIST_LEN, gamepad=cfg.PRAGMA_GAMEPAD)
     else:
         INT = partial(LoggedInterfaceLidar, img_hist_len=cfg.IMG_HIST_LEN, gamepad=cfg.PRAGMA_GAMEPAD)
+elif cfg.PRAGMA_IMAGE_PROGRESS:
+    INT = partial(LoggedInterfaceImagesProgress,
+                  img_hist_len=cfg.IMG_HIST_LEN,
+                  gamepad=cfg.PRAGMA_GAMEPAD,
+                  grayscale=cfg.GRAYSCALE,
+                  resize_to=(cfg.IMG_WIDTH, cfg.IMG_HEIGHT),
+                  progress_index=4)
 else:
     INT = partial(TM2020Interface,
                   img_hist_len=cfg.IMG_HIST_LEN,
@@ -133,6 +153,8 @@ if cfg.PRAGMA_LIDAR:
         SAMPLE_COMPRESSOR = get_local_buffer_sample_lidar_progress
     else:
         SAMPLE_COMPRESSOR = get_local_buffer_sample_lidar
+elif cfg.PRAGMA_IMAGE_PROGRESS:
+    SAMPLE_COMPRESSOR = get_local_buffer_sample_tm20_imgs_progress
 else:
     SAMPLE_COMPRESSOR = get_local_buffer_sample_tm20_imgs
 
@@ -142,6 +164,8 @@ if cfg.PRAGMA_LIDAR:
         OBS_PREPROCESSOR = obs_preprocessor_tm_lidar_progress_act_in_obs
     else:
         OBS_PREPROCESSOR = obs_preprocessor_tm_lidar_act_in_obs
+elif cfg.PRAGMA_IMAGE_PROGRESS:
+    OBS_PREPROCESSOR = obs_preprocessor_tm_images_progress_act_in_obs
 else:
     OBS_PREPROCESSOR = obs_preprocessor_tm_act_in_obs
 # to augment data that comes out of the replay buffer:
@@ -157,6 +181,8 @@ if cfg.PRAGMA_LIDAR:
             MEM = MemoryTMLidarProgress
         else:
             MEM = MemoryTMLidar
+elif cfg.PRAGMA_IMAGE_PROGRESS:
+    MEM = MemoryTMFullProgress
 else:
     MEM = MemoryTMFull
 

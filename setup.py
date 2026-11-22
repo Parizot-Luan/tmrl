@@ -115,7 +115,6 @@ install_req = [
     'gymnasium',
     'rtgym>=0.13',
     'pyyaml',
-    'wandb',
     'requests',
     'opencv-python',
     'pyautogui',

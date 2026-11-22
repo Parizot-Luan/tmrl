@@ -63,7 +63,6 @@ from tmrl.training_offline import TrainingOffline
 
 # And a couple external libraries:
 import numpy as np
-import os
 
 
 # Now, let us look into the content of config.json:
@@ -75,7 +74,7 @@ import os
 # or you can change them in the TMRL config.json file (recommended).
 
 # Maximum number of training 'epochs':
-# (training is checkpointed at the end of each 'epoch', this is also when training metrics can be logged to wandb)
+# (training is checkpointed at the end of each 'epoch', this is also when training metrics can be logged)
 epochs = cfg.TMRL_CONFIG["MAX_EPOCHS"]
 
 # Number of rounds per 'epoch':
@@ -108,17 +107,6 @@ memory_size = cfg.TMRL_CONFIG["MEMORY_SIZE"]
 
 # Batch size for training:
 batch_size = cfg.TMRL_CONFIG["BATCH_SIZE"]
-
-# Wandb credentials:
-# (Change this with your own if you want to keep your training curves private)
-# (Also, please use your own wandb account if you are going to log huge stuff :) )
-
-wandb_run_id = cfg.WANDB_RUN_ID  # change this by a name of your choice for your run
-wandb_project = cfg.TMRL_CONFIG["WANDB_PROJECT"]  # name of the wandb project in which your run will appear
-wandb_entity = cfg.TMRL_CONFIG["WANDB_ENTITY"]  # wandb account
-wandb_key = cfg.TMRL_CONFIG["WANDB_KEY"]  # wandb API key
-
-os.environ['WANDB_API_KEY'] = wandb_key  # this line sets your wandb API key as the active key
 
 # Number of time-steps after which episodes collected by the worker are truncated:
 max_samples_per_episode = cfg.TMRL_CONFIG["RW_MAX_SAMPLES_PER_EPISODE"]
@@ -724,7 +712,7 @@ class SACTrainingAgent(TrainingAgent):
             batch: (previous observation, action, reward, new observation, terminated signal, truncated signal)
 
         Returns:
-            logs: Dictionary: a python dictionary of training metrics you wish to log on wandb
+            logs: Dictionary: a python dictionary of training metrics you wish to log
         """
         # First, we decompose our batch into its relevant components, ignoring the "truncated" signal:
         o, a, r, o2, d, _ = batch
@@ -781,7 +769,7 @@ class SACTrainingAgent(TrainingAgent):
                 p_targ.data.mul_(self.polyak)
                 p_targ.data.add_((1 - self.polyak) * p.data)
 
-        # TMRL enables us to log training metrics to wandb:
+        # TMRL enables us to log training metrics:
         ret_dict = dict(
             loss_actor=loss_pi.detach().item(),
             loss_critic=loss_q.detach().item(),
@@ -854,11 +842,6 @@ if __name__ == "__main__":
                              password=password,
                              security=security)
         my_trainer.run()
-
-        # Note: if you want to log training metrics to wandb, replace my_trainer.run() with:
-        # my_trainer.run_with_wandb(entity=wandb_entity,
-        #                           project=wandb_project,
-        #                           run_id=wandb_run_id)
 
     elif args.worker or args.test:
         rw = RolloutWorker(env_cls=env_cls,

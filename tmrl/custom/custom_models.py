@@ -943,4 +943,184 @@ class LateFusionActorCritic(nn.Module):
             if not len(res.shape):
                 res = np.expand_dims(res, 0)
             return res
+
+
+# IMAGE + PROGRESS CNN + GRU ===========================================================================================
+
+class ResidualBlock(nn.Module):
+    def __init__(self, channels):
+        super().__init__()
+        self.conv1 = nn.Conv2d(channels, channels, 3, padding=1)
+        self.norm1 = nn.GroupNorm(8, channels)
+        self.conv2 = nn.Conv2d(channels, channels, 3, padding=1)
+        self.norm2 = nn.GroupNorm(8, channels)
+        self.activation = nn.SiLU()
+
+    def forward(self, x):
+        residual = x
+        x = self.activation(self.norm1(self.conv1(x)))
+        x = self.norm2(self.conv2(x))
+        return self.activation(x + residual)
+
+
+class ImageProgressFrameEncoder(nn.Module):
+    def __init__(self, in_channels=1, out_dim=128):
+        super().__init__()
+        self.out_dim = out_dim
+        self.net = nn.Sequential(
+            nn.Conv2d(in_channels, 32, 3, stride=2, padding=1),
+            nn.GroupNorm(8, 32),
+            nn.SiLU(),
+            nn.Conv2d(32, 64, 3, stride=2, padding=1),
+            nn.GroupNorm(8, 64),
+            nn.SiLU(),
+            ResidualBlock(64),
+            nn.Conv2d(64, 128, 3, stride=2, padding=1),
+            nn.GroupNorm(8, 128),
+            nn.SiLU(),
+            ResidualBlock(128),
+        )
+        self.pool = nn.AdaptiveAvgPool2d(1)
+        self.projection = nn.Sequential(
+            nn.Linear(128, out_dim),
+            nn.LayerNorm(out_dim),
+            nn.SiLU(),
+        )
+
+    def forward(self, x):
+        x = self.pool(self.net(x)).flatten(1)
+        return self.projection(x)
+
+
+class ImageProgressFeatureExtractor(nn.Module):
+    def __init__(self, observation_space, action_space, feature_dim=128, hidden_dim=128):
+        super().__init__()
+        image_shape = observation_space[3].shape
+        self.img_hist_len = image_shape[0]
+        self.in_channels = 1 if len(image_shape) == 3 else image_shape[3]
+        dim_act = action_space.shape[0]
+        self.n_prev_actions = cfg.ACT_BUF_LEN
+        self.n_scalars = 4 + self.n_prev_actions * dim_act
+        self.feature_dim = feature_dim
+
+        self.frame_encoder = ImageProgressFrameEncoder(in_channels=self.in_channels, out_dim=feature_dim)
+        self.temporal_encoder = nn.GRU(feature_dim, feature_dim, batch_first=True)
+        self.scalar_encoder = nn.Sequential(
+            nn.Linear(self.n_scalars, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.SiLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.SiLU(),
+        )
+        self.scalar_out_dim = hidden_dim
+
+    def forward(self, obs):
+        speed, gear, rpm, images, progress, *prev_actions = obs
+        if images.dim() == 3:
+            images = images.unsqueeze(0)
+        elif images.dim() == 4 and self.in_channels == 3 and images.shape[-1] == 3:
+            images = images.unsqueeze(0)
+        if images.dim() == 5:
+            images = images.permute(0, 1, 4, 2, 3)
+        batch_size = images.shape[0]
+        images = images.float()
+        frames = images.reshape(batch_size * self.img_hist_len, self.in_channels,
+                                images.shape[-2], images.shape[-1])
+        frame_features = self.frame_encoder(frames).reshape(batch_size, self.img_hist_len, self.feature_dim)
+        image_features = self.temporal_encoder(frame_features)[0][:, -1]
+
+        scalars = [speed, gear, rpm, progress]
+        scalars = [x.reshape(batch_size, -1) if x.dim() > 1 else x.reshape(batch_size, 1) for x in scalars]
+        scalars += [a.reshape(batch_size, -1) for a in prev_actions]
+        scalar_features = self.scalar_encoder(torch.cat(scalars, dim=-1))
+        return torch.cat((image_features, scalar_features), dim=-1)
+
+
+class SquashedGaussianImageProgressActor(TorchActorModule):
+    def __init__(self, observation_space, action_space, hidden_sizes=(256, 256), activation=nn.SiLU):
+        super().__init__(observation_space, action_space)
+        dim_act = action_space.shape[0]
+        act_limit = action_space.high[0]
+        self.features = ImageProgressFeatureExtractor(observation_space, action_space)
+        self.trunk = nn.Sequential(
+            nn.Linear(self.features.feature_dim + self.features.scalar_out_dim, hidden_sizes[0]),
+            nn.LayerNorm(hidden_sizes[0]),
+            activation(),
+            nn.Linear(hidden_sizes[0], hidden_sizes[1]),
+            nn.LayerNorm(hidden_sizes[1]),
+            activation(),
+        )
+        self.mu_layer = nn.Linear(hidden_sizes[-1], dim_act)
+        self.log_std_layer = nn.Linear(hidden_sizes[-1], dim_act)
+        self.act_limit = act_limit
+
+    def forward(self, obs, test=False, with_logprob=True):
+        net_out = self.trunk(self.features(obs))
+        mu = self.mu_layer(net_out)
+        log_std = self.log_std_layer(net_out)
+        log_std = torch.clamp(log_std, LOG_STD_MIN, LOG_STD_MAX)
+        std = torch.exp(log_std)
+
+        pi_distribution = Normal(mu, std)
+        if test:
+            pi_action = mu
+        else:
+            pi_action = pi_distribution.rsample()
+
+        if with_logprob:
+            logp_pi = pi_distribution.log_prob(pi_action).sum(axis=-1)
+            logp_pi -= (2 * (np.log(2) - pi_action - F.softplus(-2 * pi_action))).sum(axis=1)
+        else:
+            logp_pi = None
+
+        pi_action = torch.tanh(pi_action)
+        pi_action = self.act_limit * pi_action
+        return pi_action, logp_pi
+
+    def act(self, obs, test=False):
+        with torch.no_grad():
+            a, _ = self.forward(obs, test, False)
+            res = a.squeeze().cpu().numpy()
+            if not len(res.shape):
+                res = np.expand_dims(res, 0)
+            return res
+
+
+class ImageProgressQFunction(nn.Module):
+    def __init__(self, observation_space, action_space, hidden_sizes=(256, 256), activation=nn.SiLU):
+        super().__init__()
+        dim_act = action_space.shape[0]
+        self.features = ImageProgressFeatureExtractor(observation_space, action_space)
+        in_dim = self.features.feature_dim + self.features.scalar_out_dim + dim_act
+        self.q = nn.Sequential(
+            nn.Linear(in_dim, hidden_sizes[0]),
+            nn.LayerNorm(hidden_sizes[0]),
+            activation(),
+            nn.Linear(hidden_sizes[0], hidden_sizes[1]),
+            nn.LayerNorm(hidden_sizes[1]),
+            activation(),
+            nn.Linear(hidden_sizes[1], 1),
+        )
+
+    def forward(self, obs, act):
+        x = torch.cat((self.features(obs), act), dim=-1)
+        q = self.q(x)
+        return torch.squeeze(q, -1)
+
+
+class ImageProgressActorCritic(nn.Module):
+    def __init__(self, observation_space, action_space, hidden_sizes=(256, 256), activation=nn.SiLU):
+        super().__init__()
+        self.actor = SquashedGaussianImageProgressActor(observation_space, action_space, hidden_sizes, activation)
+        self.q1 = ImageProgressQFunction(observation_space, action_space, hidden_sizes, activation)
+        self.q2 = ImageProgressQFunction(observation_space, action_space, hidden_sizes, activation)
+
+    def act(self, obs, test=False):
+        with torch.no_grad():
+            a, _ = self.actor(obs, test, False)
+            res = a.squeeze().cpu().numpy()
+            if not len(res.shape):
+                res = np.expand_dims(res, 0)
+            return res
  

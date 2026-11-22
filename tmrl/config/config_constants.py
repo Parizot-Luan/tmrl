@@ -2,7 +2,6 @@
 
 import logging
 
-import os
 from pathlib import Path
 import json
 import platform
@@ -64,6 +63,7 @@ SERVER_IP_FOR_TRAINER = PUBLIC_IP_SERVER if not LOCALHOST_TRAINER else "127.0.0.
 ENV_CONFIG = TMRL_CONFIG["ENV"]
 RTGYM_INTERFACE = ENV_CONFIG["RTGYM_INTERFACE"]
 PRAGMA_LIDAR = RTGYM_INTERFACE.endswith("LIDAR")  # True if Lidar, False if images
+PRAGMA_IMAGE_PROGRESS = RTGYM_INTERFACE == "TM20IMAGESPROGRESS"
 PRAGMA_PROGRESS = RTGYM_INTERFACE.endswith("LIDARPROGRESS")
 if PRAGMA_PROGRESS:
     PRAGMA_LIDAR = True
@@ -102,15 +102,6 @@ MODEL_PATH_TRAINER = str(WEIGHTS_FOLDER / (RUN_NAME + "_t.tmod"))
 CHECKPOINT_PATH = str(CHECKPOINTS_FOLDER / (RUN_NAME + "_t.tcpt"))
 DATASET_PATH = str(DATASET_FOLDER)
 REWARD_PATH = str(REWARD_FOLDER / "reward.pkl")
-
-# WANDB: =======================================================
-
-WANDB_RUN_ID = RUN_NAME
-WANDB_PROJECT = TMRL_CONFIG["WANDB_PROJECT"]
-WANDB_ENTITY = TMRL_CONFIG["WANDB_ENTITY"]
-WANDB_KEY = TMRL_CONFIG["WANDB_KEY"]
-
-os.environ['WANDB_API_KEY'] = WANDB_KEY
 
 # NETWORKING: ==================================================
 

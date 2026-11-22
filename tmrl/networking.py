@@ -3,9 +3,6 @@ import datetime
 import os
 import socket
 import time
-import atexit
-import json
-import shutil
 import tempfile
 import itertools
 from os.path import exists
@@ -17,7 +14,7 @@ from tlspyo import Relay, Endpoint
 
 # local imports
 from tmrl.actor import ActorModule
-from tmrl.util import dump, load, partial_to_dict
+from tmrl.util import dump, load
 import tmrl.config.config_constants as cfg
 import tmrl.config.config_objects as cfg_obj
 
@@ -204,14 +201,6 @@ class TrainerInterface:
         return res
 
 
-def log_environment_variables():
-    """
-    add certain relevant environment variables to our config
-    usage: `LOG_VARIABLES='HOME JOBID' python ...`
-    """
-    return {k: os.environ.get(k, '') for k in os.environ.get('LOG_VARIABLES', '').strip().split()}
-
-
 def load_run_instance(checkpoint_path):
     """
     Default function used to load trainers from checkpoint path
@@ -282,41 +271,6 @@ def iterate_epochs(run_cls,
     finally:
         if checkpoint_path.endswith("_remove_on_exit") and exists(checkpoint_path):
             os.remove(checkpoint_path)
-
-
-def run_with_wandb(entity, project, run_id, interface, run_cls, checkpoint_path: str = None, dump_run_instance_fn=None, load_run_instance_fn=None, updater_fn=None):
-    """
-    Main training loop (remote).
-
-    saves config and stats to https://wandb.com
-    """
-    dump_run_instance_fn = dump_run_instance_fn or dump_run_instance
-    load_run_instance_fn = load_run_instance_fn or load_run_instance
-    wandb_dir = tempfile.mkdtemp()  # prevent wandb from polluting the home directory
-    atexit.register(shutil.rmtree, wandb_dir, ignore_errors=True)  # clean up after wandb atexit handler finishes
-    import wandb
-    logging.debug(f" run_cls: {run_cls}")
-    config = partial_to_dict(run_cls)
-    config['environ'] = log_environment_variables()
-    # config['git'] = git_info()  # TODO: check this for bugs
-    resume = checkpoint_path and exists(checkpoint_path)
-    wandb_initialized = False
-    err_cpt = 0
-    while not wandb_initialized:
-        try:
-            wandb.init(dir=wandb_dir, entity=entity, project=project, id=run_id, resume=resume, config=config)
-            wandb_initialized = True
-        except Exception as e:
-            err_cpt += 1
-            logging.warning(f"wandb error {err_cpt}: {e}")
-            if err_cpt > 10:
-                logging.warning(f"Could not connect to wandb, aborting.")
-                exit()
-            else:
-                time.sleep(10.0)
-    # logging.info(config)
-    for stats in iterate_epochs(run_cls, interface, checkpoint_path, dump_run_instance_fn, load_run_instance_fn, 1, updater_fn):
-        [wandb.log(json.loads(s.to_json())) for s in stats]
 
 
 def run(interface, run_cls, checkpoint_path: str = None, dump_run_instance_fn=None, load_run_instance_fn=None, updater_fn=None):
@@ -399,33 +353,6 @@ class Trainer:
             load_run_instance_fn=self.load_run_instance_fn,
             updater_fn=self.updater_fn)
 
-    def run_with_wandb(self,
-                       entity=cfg.WANDB_ENTITY,
-                       project=cfg.WANDB_PROJECT,
-                       run_id=cfg.WANDB_RUN_ID,
-                       key=None):
-        """
-        Runs training while logging metrics to wandb_.
-
-        .. _wandb: https://wandb.ai
-
-        Args:
-            entity (str): wandb entity
-            project (str): wandb project
-            run_id (str): name of the run
-            key (str): wandb API key
-        """
-        if key is not None:
-            os.environ['WANDB_API_KEY'] = key
-        run_with_wandb(entity=entity,
-                       project=project,
-                       run_id=run_id,
-                       interface=self.interface,
-                       run_cls=self.training_cls,
-                       checkpoint_path=self.checkpoint_path,
-                       dump_run_instance_fn=self.dump_run_instance_fn,
-                       load_run_instance_fn=self.load_run_instance_fn,
-                       updater_fn=self.updater_fn)
 
 
 # ROLLOUT WORKER: ===================================

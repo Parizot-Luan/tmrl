@@ -16,6 +16,16 @@ def obs_preprocessor_tm_act_in_obs(obs):
     return obs
 
 
+def obs_preprocessor_tm_images_progress_act_in_obs(obs):
+    """
+    Preprocessor for TM2020 full environment with grayscale images and progress
+    """
+    grayscale_images = obs[3].astype(np.float32) / 256.0
+    progress = obs[4].astype(np.float32)
+    obs = (obs[0] / 1000.0, obs[1] / 10.0, obs[2] / 10000.0, grayscale_images, progress, *obs[5:])
+    return obs
+
+
 def obs_preprocessor_tm_lidar_act_in_obs(obs):
     """
     Preprocessor for the LIDAR environment, flattening LIDARs

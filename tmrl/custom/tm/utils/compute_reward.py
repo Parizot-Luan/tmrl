@@ -44,6 +44,7 @@ class RewardFunction:
         self.max_dist_from_traj = max_dist_from_traj
         self.step_counter = 0
         self.failure_counter = 0
+        self.last_min_dist = 0.0
         self.datalen = len(self.data)
 
         # self.traj = []
@@ -111,6 +112,7 @@ class RewardFunction:
             self.failure_counter = 0  # we reset the counter triggering episode termination
 
         self.cur_idx = best_index  # finally, we save our new best matching index
+        self.last_min_dist = float(min_dist)
 
         return reward, terminated
 
@@ -127,5 +129,6 @@ class RewardFunction:
         self.cur_idx = 0
         self.step_counter = 0
         self.failure_counter = 0
+        self.last_min_dist = 0.0
 
         # self.traj = []

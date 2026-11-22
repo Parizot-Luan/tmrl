@@ -50,12 +50,7 @@ def main(args):
                           load_run_instance_fn=cfg_obj.LOAD_RUN_INSTANCE_FN,
                           updater_fn=cfg_obj.UPDATER_FN)
         logging.info(f"--- NOW RUNNING {cfg_obj.ALG_NAME} on TrackMania ---")
-        if args.wandb:
-            trainer.run_with_wandb(entity=cfg.WANDB_ENTITY,
-                                   project=cfg.WANDB_PROJECT,
-                                   run_id=cfg.WANDB_RUN_ID)
-        else:
-            trainer.run()
+        trainer.run()
     elif args.record_reward:
         record_reward_dist(path_reward=cfg.REWARD_PATH, use_keyboard=args.use_keyboard)
     elif args.check_env:
@@ -81,7 +76,6 @@ if __name__ == "__main__":
     parser.add_argument('--record-reward', dest='record_reward', action='store_true', help='utility to record a reward function in TM20')
     parser.add_argument('--use-keyboard', dest='use_keyboard', action='store_true', help='modifier for --record-reward')
     parser.add_argument('--check-environment', dest='check_env', action='store_true', help='utility to check the environment')
-    parser.add_argument('--wandb', dest='wandb', action='store_true', help='(use with --trainer) if you want to log results on Weights and Biases, use this option')
     parser.add_argument('-d', '--config', type=json.loads, default={}, help='dictionary containing configuration options (modifiers) for the rtgym environment')
     arguments = parser.parse_args()
 

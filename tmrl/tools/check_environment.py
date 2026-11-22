@@ -4,7 +4,7 @@ import cv2
 from rtgym.envs.real_time_env import DEFAULT_CONFIG_DICT
 
 # local imports
-from tmrl.custom.tm.tm_gym_interfaces import TM2020Interface, TM2020InterfaceLidar
+from tmrl.custom.tm.tm_gym_interfaces import TM2020Interface, TM2020InterfaceImagesProgress, TM2020InterfaceLidar
 from tmrl.custom.tm.utils.window import WindowInterface
 from tmrl.custom.tm.utils.tools import Lidar
 import tmrl.config.config_constants as cfg
@@ -51,23 +51,34 @@ def show_imgs(imgs, scale=cfg.IMG_SCALE_CHECK_ENV):
 
 def check_env_tm20full():
     env_config = DEFAULT_CONFIG_DICT.copy()
-    env_config["interface"] = TM2020Interface
+    env_config["interface"] = TM2020InterfaceImagesProgress if cfg.PRAGMA_IMAGE_PROGRESS else TM2020Interface
     env_config["wait_on_done"] = True
     env_config["interface_kwargs"] = {"gamepad": False,
                                       "grayscale": cfg.GRAYSCALE,
                                       "resize_to": (cfg.IMG_WIDTH, cfg.IMG_HEIGHT)}
+
+    def log_obs(o, info):
+        if cfg.PRAGMA_IMAGE_PROGRESS:
+            logging.info(f"o:[{o[0].item():05.01f}, {o[1].item():03.01f}, {o[2].item():07.01f}, "
+                         f"imgs({len(o[3])}), progress:{o[4].item():.4f}, "
+                         f"race_time_s:{info.get('race_time_s', float('nan')):.3f}, "
+                         f"end_of_track:{info.get('end_of_track', False)}]")
+        else:
+            logging.info(f"o:[{o[0].item():05.01f}, {o[1].item():03.01f}, {o[2].item():07.01f}, imgs({len(o[3])})]")
+
     env = gymnasium.make(cfg.RTGYM_VERSION, config=env_config)
     o, i = env.reset()
     show_imgs(o[3])
-    logging.info(f"o:[{o[0].item():05.01f}, {o[1].item():03.01f}, {o[2].item():07.01f}, imgs({len(o[3])})]")
+    log_obs(o, i)
     while True:
         o, r, d, t, i = env.step(None)
         show_imgs(o[3])
-        logging.info(f"r:{r:.2f}, d:{d}, t:{t}, o:[{o[0].item():05.01f}, {o[1].item():03.01f}, {o[2].item():07.01f}, imgs({len(o[3])})]")
+        logging.info(f"r:{r:.2f}, d:{d}, t:{t}")
+        log_obs(o, i)
         if d or t:
             o, i = env.reset()
             show_imgs(o[3])
-            logging.info(f"o:[{o[0].item():05.01f}, {o[1].item():03.01f}, {o[2].item():07.01f}, imgs({len(o[3])})]")
+            log_obs(o, i)
 
 
 if __name__ == "__main__":
