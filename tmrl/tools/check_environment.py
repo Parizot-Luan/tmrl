@@ -55,7 +55,9 @@ def check_env_tm20full():
     env_config["wait_on_done"] = True
     env_config["interface_kwargs"] = {"gamepad": False,
                                       "grayscale": cfg.GRAYSCALE,
-                                      "resize_to": (cfg.IMG_WIDTH, cfg.IMG_HEIGHT)}
+                                      "resize_to": (cfg.IMG_WIDTH, cfg.IMG_HEIGHT),
+                                      "crop_top": cfg.IMG_CROP_TOP,
+                                      "crop_bottom": cfg.IMG_CROP_BOTTOM}
 
     def log_obs(o, info):
         if cfg.PRAGMA_IMAGE_PROGRESS:

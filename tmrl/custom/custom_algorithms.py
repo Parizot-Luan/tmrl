@@ -41,12 +41,14 @@ class SpinupSacAgent(TrainingAgent):  # Adapted from Spinup
     betas_critic: tuple = None  # for Adam and AdamW
     l2_actor: float = None  # weight decay
     l2_critic: float = None  # weight decay
+    use_amp: bool = False  # mixed precision for the trainer
 
     model_nograd = cached_property(lambda self: no_grad(copy_shared(self.model)))
 
     def __post_init__(self):
         observation_space, action_space = self.observation_space, self.action_space
         device = self.device or ("cuda" if torch.cuda.is_available() else "cpu")
+        self.device = device
         model = self.model_cls(observation_space, action_space)
         logging.debug(f" device SAC: {device}")
         self.model = model.to(device)
@@ -87,6 +89,13 @@ class SpinupSacAgent(TrainingAgent):  # Adapted from Spinup
         self.pi_optimizer = pi_optimizer_cls(self.model.actor.parameters(), **pi_optimizer_kwargs)
         self.q_optimizer = q_optimizer_cls(itertools.chain(self.model.q1.parameters(), self.model.q2.parameters()), **q_optimizer_kwargs)
 
+        # mixed precision:
+        self.amp_device_type = "cuda" if str(device).startswith("cuda") else "cpu"
+        self.use_amp = bool(self.use_amp) and self.amp_device_type == "cuda"
+        self.q_scaler = torch.amp.GradScaler(self.amp_device_type, enabled=self.use_amp)
+        self.pi_scaler = torch.amp.GradScaler(self.amp_device_type, enabled=self.use_amp)
+        logging.info(f" AMP enabled: {self.use_amp} ({self.amp_device_type})")
+
         # entropy coefficient:
 
         if self.target_entropy is None:
@@ -109,20 +118,44 @@ class SpinupSacAgent(TrainingAgent):  # Adapted from Spinup
 
         o, a, r, o2, d, _ = batch
 
-        pi, logp_pi = self.model.actor(o)
-        # FIXME? log_prob = log_prob.reshape(-1, 1)
+        with torch.autocast(device_type=self.amp_device_type, dtype=torch.float16, enabled=self.use_amp):
+            pi, logp_pi = self.model.actor(o)
+            # FIXME? log_prob = log_prob.reshape(-1, 1)
 
-        # loss_alpha:
+            # loss_alpha:
 
-        loss_alpha = None
-        if self.learn_entropy_coef:
-            # Important: detach the variable from the graph
-            # so we don't change it with other losses
-            # see https://github.com/rail-berkeley/softlearning/issues/60
-            alpha_t = torch.exp(self.log_alpha.detach())
-            loss_alpha = -(self.log_alpha * (logp_pi + self.target_entropy).detach()).mean()
-        else:
-            alpha_t = self.alpha_t
+            loss_alpha = None
+            if self.learn_entropy_coef:
+                # Important: detach the variable from the graph
+                # so we don't change it with other losses
+                # see https://github.com/rail-berkeley/softlearning/issues/60
+                alpha_t = torch.exp(self.log_alpha.detach()).float()
+                loss_alpha = -(self.log_alpha * (logp_pi.float() + self.target_entropy).detach()).mean()
+            else:
+                alpha_t = self.alpha_t
+
+            # Run one gradient descent step for Q1 and Q2
+
+            # loss_q:
+
+            q1 = self.model.q1(o, a)
+            q2 = self.model.q2(o, a)
+
+            # Bellman backup for Q functions
+            with torch.no_grad():
+                # Target actions come from *current* policy
+                a2, logp_a2 = self.model.actor(o2)
+
+                # Target Q-values
+                q1_pi_targ = self.model_target.q1(o2, a2)
+                q2_pi_targ = self.model_target.q2(o2, a2)
+                q_pi_targ = torch.min(q1_pi_targ, q2_pi_targ)
+                backup = r + self.gamma * (1 - d) * (q_pi_targ - alpha_t * logp_a2)
+
+            # MSE loss against Bellman backup
+            loss_q1 = ((q1 - backup)**2).mean()
+            loss_q2 = ((q2 - backup)**2).mean()
+            loss_q = (loss_q1 + loss_q2) / 2  # averaged for homogeneity with REDQ
 
         # Optimize entropy coefficient, also called
         # entropy temperature or alpha in the paper
@@ -131,32 +164,10 @@ class SpinupSacAgent(TrainingAgent):  # Adapted from Spinup
             loss_alpha.backward()
             self.alpha_optimizer.step()
 
-        # Run one gradient descent step for Q1 and Q2
-
-        # loss_q:
-
-        q1 = self.model.q1(o, a)
-        q2 = self.model.q2(o, a)
-
-        # Bellman backup for Q functions
-        with torch.no_grad():
-            # Target actions come from *current* policy
-            a2, logp_a2 = self.model.actor(o2)
-
-            # Target Q-values
-            q1_pi_targ = self.model_target.q1(o2, a2)
-            q2_pi_targ = self.model_target.q2(o2, a2)
-            q_pi_targ = torch.min(q1_pi_targ, q2_pi_targ)
-            backup = r + self.gamma * (1 - d) * (q_pi_targ - alpha_t * logp_a2)
-
-        # MSE loss against Bellman backup
-        loss_q1 = ((q1 - backup)**2).mean()
-        loss_q2 = ((q2 - backup)**2).mean()
-        loss_q = (loss_q1 + loss_q2) / 2  # averaged for homogeneity with REDQ
-
-        self.q_optimizer.zero_grad()
-        loss_q.backward()
-        self.q_optimizer.step()
+        self.q_optimizer.zero_grad(set_to_none=True)
+        self.q_scaler.scale(loss_q).backward()
+        self.q_scaler.step(self.q_optimizer)
+        self.q_scaler.update()
 
         # Freeze Q-networks so you don't waste computational effort
         # computing gradients for them during the policy learning step.
@@ -167,17 +178,19 @@ class SpinupSacAgent(TrainingAgent):  # Adapted from Spinup
 
         # loss_pi:
 
-        # pi, logp_pi = self.model.actor(o)
-        q1_pi = self.model.q1(o, pi)
-        q2_pi = self.model.q2(o, pi)
-        q_pi = torch.min(q1_pi, q2_pi)
+        with torch.autocast(device_type=self.amp_device_type, dtype=torch.float16, enabled=self.use_amp):
+            # pi, logp_pi = self.model.actor(o)
+            q1_pi = self.model.q1(o, pi)
+            q2_pi = self.model.q2(o, pi)
+            q_pi = torch.min(q1_pi, q2_pi)
 
-        # Entropy-regularized policy loss
-        loss_pi = (alpha_t * logp_pi - q_pi).mean()
+            # Entropy-regularized policy loss
+            loss_pi = (alpha_t * logp_pi - q_pi).mean()
 
-        self.pi_optimizer.zero_grad()
-        loss_pi.backward()
-        self.pi_optimizer.step()
+        self.pi_optimizer.zero_grad(set_to_none=True)
+        self.pi_scaler.scale(loss_pi).backward()
+        self.pi_scaler.step(self.pi_optimizer)
+        self.pi_scaler.update()
 
         # Unfreeze Q-networks so you can optimize it at next DDPG step.
         self.model.q1.requires_grad_(True)

@@ -74,16 +74,17 @@ class TM2020OpenPlanetClient:
         return data
 
 
-def save_ghost(host='127.0.0.1', port=10000):
+def save_ghost(host='127.0.0.1', port=10000, timeout=2.0):
     """
     Saves the current ghost
 
     Args:
         host (str): IP address of the ghost-saving server
         port (int): Port of the ghost-saving server
+        timeout (float): connection timeout in seconds
     """
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.connect((host, port))
+    with socket.create_connection((host, port), timeout=timeout):
+        pass
 
 
 def armin(tab):

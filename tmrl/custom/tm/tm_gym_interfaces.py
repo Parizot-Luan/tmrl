@@ -39,17 +39,21 @@ class TM2020Interface(RealTimeGymInterface):
                  save_replays: bool = False,
                  save_replay_interval_minutes: float = 0.0,
                  grayscale: bool = True,
-                 resize_to=(64, 64)):
+                 resize_to=(64, 64),
+                 crop_top: float = 0.0,
+                 crop_bottom: float = 0.0):
         """
         Base rtgym interface for TrackMania 2020 (Full environment)
 
         Args:
             img_hist_len: int: history of images that are part of observations
             gamepad: bool: whether to use a virtual gamepad for control
-            save_replays: bool: whether to save TrackMania replays on successful episodes
-            save_replay_interval_minutes: float: if > 0, save a replay at most once per interval, including on reset
+            save_replays: bool: whether to save TrackMania replays at the end of episodes
+            save_replay_interval_minutes: float: if > 0, save a replay at most once per interval
             grayscale: bool: whether to output grayscale images or color images
             resize_to: Tuple[int, int]: resize output images to this (width, height)
+            crop_top: float: fraction of the image height to remove from the top
+            crop_bottom: float: fraction of the image height to remove from the bottom
         """
         self.last_time = None
         self.img_hist_len = img_hist_len
@@ -63,9 +67,12 @@ class TM2020Interface(RealTimeGymInterface):
         self.small_window = None
         self.save_replays = save_replays
         self.save_replay_interval_minutes = float(save_replay_interval_minutes) if save_replay_interval_minutes is not None else 0.0
-        self.last_replay_save = time.time()
+        self.last_replay_save = 0.0
         self.grayscale = grayscale
         self.resize_to = resize_to
+        self.crop_top = min(max(float(crop_top), 0.0), 0.95)
+        self.crop_bottom = min(max(float(crop_bottom), 0.0), 0.95)
+        assert self.crop_top + self.crop_bottom < 1.0, "crop_top + crop_bottom must be < 1.0"
         self.finish_reward = cfg.REWARD_CONFIG['END_OF_TRACK']
         self.constant_penalty = cfg.REWARD_CONFIG['CONSTANT_PENALTY']
         self.time_penalty = float(cfg.REWARD_CONFIG.get('TIME_PENALTY', 0.0))
@@ -135,6 +142,13 @@ class TM2020Interface(RealTimeGymInterface):
 
     def grab_data_and_img(self):
         img = self.window_interface.screenshot()[:, :, :3]  # BGR ordering
+        if self.crop_top > 0.0 or self.crop_bottom > 0.0:
+            h = img.shape[0]
+            top = int(round(h * self.crop_top))
+            bottom = h - int(round(h * self.crop_bottom))
+            if bottom <= top:
+                raise ValueError(f"Invalid crop: top={top}, bottom={bottom}, height={h}")
+            img = img[top:bottom, :, :]
         if self.resize_to is not None:  # cv2.resize takes dim as (width, height)
             img = cv2.resize(img, self.resize_to)
         if self.grayscale:
@@ -209,18 +223,24 @@ class TM2020Interface(RealTimeGymInterface):
         self._shaping_steps += 1
         return penalty, info
 
+    def _maybe_save_replay(self):
+        if not self.save_replays:
+            return
+        now = time.time()
+        interval_s = max(0.0, self.save_replay_interval_minutes) * 60.0
+        if interval_s > 0.0 and now - self.last_replay_save < interval_s:
+            return
+        try:
+            save_ghost()
+            self.last_replay_save = now
+            logging.info("Replay save requested")
+            time.sleep(1.0)
+        except Exception as e:
+            logging.warning(f"Could not save replay: {e}")
+
     def reset_common(self):
         if not self.initialized:
             self.initialize()
-        if self.save_replays and self.save_replay_interval_minutes > 0.0:
-            now = time.time()
-            if now - self.last_replay_save >= self.save_replay_interval_minutes * 60.0:
-                try:
-                    save_ghost()
-                    self.last_replay_save = now
-                    time.sleep(1.0)
-                except Exception as e:
-                    logging.warning(f"Could not save replay: {e}")
         self.send_control(self.get_default_action())
         self.reset_race()
         time_sleep = max(0, cfg.SLEEP_TIME_AT_RESET - 0.1) if self.gamepad else cfg.SLEEP_TIME_AT_RESET
@@ -259,10 +279,8 @@ class TM2020Interface(RealTimeGymInterface):
         Non-blocking function
         The agent stays 'paused', waiting in position
         """
+        self._maybe_save_replay()
         self.send_control(self.get_default_action())
-        if self.save_replays and self.save_replay_interval_minutes <= 0.0:
-            save_ghost()
-            time.sleep(1.0)
         self.reset_race()
         time.sleep(0.5)
         self.close_finish_pop_up_tm20()

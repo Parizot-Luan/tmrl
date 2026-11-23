@@ -113,6 +113,18 @@ def update_run_instance(run_instance, training_cls):
                 run_instance.agent.q_optimizer = Adam(itertools.chain(run_instance.agent.model.q1.parameters(), run_instance.agent.model.q2.parameters()), lr=lr_critic)
                 logging.info(f"Critic optimizer reinitialized with new lr: {lr_critic} (old lr: {old}).")
 
+            if not hasattr(run_instance.agent, "amp_device_type"):
+                device = run_instance.device or ("cuda" if torch.cuda.is_available() else "cpu")
+                run_instance.agent.amp_device_type = "cuda" if str(device).startswith("cuda") else "cpu"
+            if not hasattr(run_instance.agent, "use_amp"):
+                run_instance.agent.use_amp = bool(cfg.USE_AMP) and run_instance.agent.amp_device_type == "cuda"
+            if not hasattr(run_instance.agent, "q_scaler"):
+                run_instance.agent.q_scaler = torch.amp.GradScaler(run_instance.agent.amp_device_type,
+                                                                   enabled=run_instance.agent.use_amp)
+            if not hasattr(run_instance.agent, "pi_scaler"):
+                run_instance.agent.pi_scaler = torch.amp.GradScaler(run_instance.agent.amp_device_type,
+                                                                    enabled=run_instance.agent.use_amp)
+
         if run_instance.agent.learn_entropy_coef != learn_entropy_coef:
             logging.warning(f"Cannot switch entropy learning.")
 

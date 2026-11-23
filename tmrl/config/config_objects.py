@@ -133,13 +133,17 @@ elif cfg.PRAGMA_IMAGE_PROGRESS:
                   gamepad=cfg.PRAGMA_GAMEPAD,
                   grayscale=cfg.GRAYSCALE,
                   resize_to=(cfg.IMG_WIDTH, cfg.IMG_HEIGHT),
+                  crop_top=cfg.IMG_CROP_TOP,
+                  crop_bottom=cfg.IMG_CROP_BOTTOM,
                   progress_index=4)
 else:
     INT = partial(TM2020Interface,
                   img_hist_len=cfg.IMG_HIST_LEN,
                   gamepad=cfg.PRAGMA_GAMEPAD,
                   grayscale=cfg.GRAYSCALE,
-                  resize_to=(cfg.IMG_WIDTH, cfg.IMG_HEIGHT))
+                  resize_to=(cfg.IMG_WIDTH, cfg.IMG_HEIGHT),
+                  crop_top=cfg.IMG_CROP_TOP,
+                  crop_bottom=cfg.IMG_CROP_BOTTOM)
 
 CONFIG_DICT = rtgym.DEFAULT_CONFIG_DICT.copy()
 CONFIG_DICT["interface"] = INT
@@ -215,7 +219,8 @@ if ALG_NAME == "SAC":
         betas_actor=ALG_CONFIG["BETAS_ACTOR"] if "BETAS_ACTOR" in ALG_CONFIG else None,
         betas_critic=ALG_CONFIG["BETAS_CRITIC"] if "BETAS_CRITIC" in ALG_CONFIG else None,
         l2_actor=ALG_CONFIG["L2_ACTOR"] if "L2_ACTOR" in ALG_CONFIG else None,
-        l2_critic=ALG_CONFIG["L2_CRITIC"] if "L2_CRITIC" in ALG_CONFIG else None
+        l2_critic=ALG_CONFIG["L2_CRITIC"] if "L2_CRITIC" in ALG_CONFIG else None,
+        use_amp=cfg.USE_AMP
     )
 else:
     AGENT = partial(
