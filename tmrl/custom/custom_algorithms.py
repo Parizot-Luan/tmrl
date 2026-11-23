@@ -87,7 +87,9 @@ class SpinupSacAgent(TrainingAgent):  # Adapted from Spinup
             q_optimizer_kwargs["weight_decay"] = self.l2_critic
 
         self.pi_optimizer = pi_optimizer_cls(self.model.actor.parameters(), **pi_optimizer_kwargs)
-        self.q_optimizer = q_optimizer_cls(itertools.chain(self.model.q1.parameters(), self.model.q2.parameters()), **q_optimizer_kwargs)
+        # q1 and q2 intentionally share one feature extractor: optimize its parameters only once.
+        q_parameters = list(self.model.q1.q.parameters()) + list(self.model.q2.q.parameters()) + list(self.model.q1.features.parameters())
+        self.q_optimizer = q_optimizer_cls(q_parameters, **q_optimizer_kwargs)
 
         # mixed precision:
         self.amp_device_type = "cuda" if str(device).startswith("cuda") else "cpu"
@@ -95,6 +97,15 @@ class SpinupSacAgent(TrainingAgent):  # Adapted from Spinup
         self.q_scaler = torch.amp.GradScaler(self.amp_device_type, enabled=self.use_amp)
         self.pi_scaler = torch.amp.GradScaler(self.amp_device_type, enabled=self.use_amp)
         logging.info(f" AMP enabled: {self.use_amp} ({self.amp_device_type})")
+
+        # Optional graph compilation on Linux/CUDA. Falls back to eager mode if unavailable.
+        if self.amp_device_type == "cuda":
+            try:
+                self.model = torch.compile(self.model, mode="reduce-overhead")
+                self.model_target = torch.compile(self.model_target, mode="reduce-overhead")
+                logging.info("torch.compile enabled for SAC trainer")
+            except Exception as exc:
+                logging.warning(f"torch.compile disabled: {exc}")
 
         # entropy coefficient:
 
@@ -134,12 +145,15 @@ class SpinupSacAgent(TrainingAgent):  # Adapted from Spinup
             else:
                 alpha_t = self.alpha_t
 
+            # Reuse one observation-feature pass for both critics.
+            obs_features = self.model.q1.features(o)
+
             # Run one gradient descent step for Q1 and Q2
 
             # loss_q:
 
-            q1 = self.model.q1(o, a)
-            q2 = self.model.q2(o, a)
+            q1 = self.model.q1(o, a, features=obs_features)
+            q2 = self.model.q2(o, a, features=obs_features)
 
             # Bellman backup for Q functions
             with torch.no_grad():
@@ -147,14 +161,15 @@ class SpinupSacAgent(TrainingAgent):  # Adapted from Spinup
                 a2, logp_a2 = self.model.actor(o2)
 
                 # Target Q-values
-                q1_pi_targ = self.model_target.q1(o2, a2)
-                q2_pi_targ = self.model_target.q2(o2, a2)
+                o2_features = self.model_target.q1.features(o2)
+                q1_pi_targ = self.model_target.q1(o2, a2, features=o2_features)
+                q2_pi_targ = self.model_target.q2(o2, a2, features=o2_features)
                 q_pi_targ = torch.min(q1_pi_targ, q2_pi_targ)
                 backup = r + self.gamma * (1 - d) * (q_pi_targ - alpha_t * logp_a2)
 
-            # MSE loss against Bellman backup
-            loss_q1 = ((q1 - backup)**2).mean()
-            loss_q2 = ((q2 - backup)**2).mean()
+            # MSE loss against Bellman backup. Final Q head and loss stay in fp32.
+            loss_q1 = ((q1.float() - backup.float()) ** 2).mean()
+            loss_q2 = ((q2.float() - backup.float()) ** 2).mean()
             loss_q = (loss_q1 + loss_q2) / 2  # averaged for homogeneity with REDQ
 
         # Optimize entropy coefficient, also called
@@ -179,13 +194,13 @@ class SpinupSacAgent(TrainingAgent):  # Adapted from Spinup
         # loss_pi:
 
         with torch.autocast(device_type=self.amp_device_type, dtype=torch.float16, enabled=self.use_amp):
-            # pi, logp_pi = self.model.actor(o)
-            q1_pi = self.model.q1(o, pi)
-            q2_pi = self.model.q2(o, pi)
+            # Reuse the observation features already computed for the critic loss.
+            q1_pi = self.model.q1(o, pi, features=obs_features.detach())
+            q2_pi = self.model.q2(o, pi, features=obs_features.detach())
             q_pi = torch.min(q1_pi, q2_pi)
 
-            # Entropy-regularized policy loss
-            loss_pi = (alpha_t * logp_pi - q_pi).mean()
+            # Entropy-regularized policy loss. Q head and loss stay in fp32.
+            loss_pi = (alpha_t * logp_pi.float() - q_pi.float()).mean()
 
         self.pi_optimizer.zero_grad(set_to_none=True)
         self.pi_scaler.scale(loss_pi).backward()
@@ -209,8 +224,8 @@ class SpinupSacAgent(TrainingAgent):  # Adapted from Spinup
 
             if not cfg.DEBUG_MODE:
                 ret_dict = dict(
-                    loss_actor=loss_pi.detach().item(),
-                    loss_critic=loss_q.detach().item(),
+                    loss_actor=loss_pi.detach(),
+                    loss_critic=loss_q.detach(),
                 )
             else:
                 q1_o2_a2 = self.model.q1(o2, a2)
@@ -234,8 +249,8 @@ class SpinupSacAgent(TrainingAgent):  # Adapted from Spinup
                 diff_q2_backup_r = (q2 - backup + r).detach()
 
                 ret_dict = dict(
-                    loss_actor=loss_pi.detach().item(),
-                    loss_critic=loss_q.detach().item(),
+                    loss_actor=loss_pi.detach(),
+                    loss_critic=loss_q.detach(),
                     # debug:
                     debug_log_pi=logp_pi.detach().mean().item(),
                     debug_log_pi_std=logp_pi.detach().std().item(),
@@ -300,8 +315,8 @@ class SpinupSacAgent(TrainingAgent):  # Adapted from Spinup
                 )
 
         if self.learn_entropy_coef:
-            ret_dict["loss_entropy_coef"] = loss_alpha.detach().item()
-            ret_dict["entropy_coef"] = alpha_t.item()
+            ret_dict["loss_entropy_coef"] = loss_alpha.detach()
+            ret_dict["entropy_coef"] = alpha_t.detach()
 
         return ret_dict
 
@@ -427,12 +442,12 @@ class REDQSACAgent(TrainingAgent):
         if update_policy:
             self.loss_pi = loss_pi.detach()
         ret_dict = dict(
-            loss_actor=self.loss_pi.detach().item(),
+            loss_actor=self.loss_pi.detach(),
             loss_critic=loss_q.detach().item(),
         )
 
         if self.learn_entropy_coef:
-            ret_dict["loss_entropy_coef"] = loss_alpha.detach().item()
-            ret_dict["entropy_coef"] = alpha_t.item()
+            ret_dict["loss_entropy_coef"] = loss_alpha.detach()
+            ret_dict["entropy_coef"] = alpha_t.detach()
 
         return ret_dict

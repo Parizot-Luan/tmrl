@@ -150,7 +150,11 @@ class TrainingOffline:
             update_buf_time = t2 - t1
             train_time = t3 - t2
             logging.debug(f"round_time:{round_time}, idle_time:{idle_time}, update_buf_time:{update_buf_time}, train_time:{train_time}")
-            stats += pandas_dict(memory_len=len(self.memory), round_time=round_time, idle_time=idle_time, **DataFrame(stats_training).mean(skipna=True)),
+            stats_training_values = [
+                {key: (value.item() if torch.is_tensor(value) else value) for key, value in item.items()}
+                for item in stats_training
+            ]
+            stats += pandas_dict(memory_len=len(self.memory), round_time=round_time, idle_time=idle_time, **DataFrame(stats_training_values).mean(skipna=True)),
 
             logging.info(stats[-1].add_prefix("  ").to_string() + '\n')
 
@@ -203,6 +207,8 @@ class TorchTrainingOffline(TrainingOffline):
             device (str): device on which the memory will collate training samples (None for automatic)
         """
         device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+        if str(device).startswith("cuda"):
+            torch.backends.cudnn.benchmark = True
         super().__init__(env_cls,
                          memory_cls,
                          training_agent_cls,

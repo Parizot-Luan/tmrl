@@ -963,8 +963,28 @@ class ResidualBlock(nn.Module):
         return self.activation(x + residual)
 
 
+class SpatialSoftmax(nn.Module):
+    def __init__(self, height, width, channels):
+        super().__init__()
+        self.log_temperature = nn.Parameter(torch.zeros(1))
+        xs = torch.linspace(-1.0, 1.0, width, dtype=torch.float32).view(1, 1, 1, width)
+        ys = torch.linspace(-1.0, 1.0, height, dtype=torch.float32).view(1, 1, height, 1)
+        self.register_buffer("xs", xs, persistent=False)
+        self.register_buffer("ys", ys, persistent=False)
+
+    def forward(self, x):
+        b, c, h, w = x.shape
+        device_type = "cuda" if x.is_cuda else "cpu"
+        with torch.autocast(device_type=device_type, enabled=False):
+            temperature = self.log_temperature.exp().clamp_min(1e-3)
+            probabilities = torch.softmax(x.float().reshape(b, c, h * w) / temperature, dim=-1).reshape(b, c, h, w)
+            x_mean = (probabilities * self.xs).sum(dim=(2, 3))
+            y_mean = (probabilities * self.ys).sum(dim=(2, 3))
+            return torch.cat((x_mean, y_mean), dim=-1)
+
+
 class ImageProgressFrameEncoder(nn.Module):
-    def __init__(self, in_channels=1, out_dim=128):
+    def __init__(self, in_channels=1, out_dim=128, input_height=48, input_width=48):
         super().__init__()
         self.out_dim = out_dim
         self.net = nn.Sequential(
@@ -980,16 +1000,18 @@ class ImageProgressFrameEncoder(nn.Module):
             nn.SiLU(),
             ResidualBlock(128),
         )
-        self.pool = nn.AdaptiveAvgPool2d(1)
+        with torch.no_grad():
+            dummy = torch.zeros(1, in_channels, input_height, input_width)
+            _, _, feature_height, feature_width = self.net(dummy).shape
+        self.spatial = SpatialSoftmax(feature_height, feature_width, 128)
         self.projection = nn.Sequential(
-            nn.Linear(128, out_dim),
+            nn.Linear(256, out_dim),
             nn.LayerNorm(out_dim),
             nn.SiLU(),
         )
 
     def forward(self, x):
-        x = self.pool(self.net(x)).flatten(1)
-        return self.projection(x)
+        return self.projection(self.spatial(self.net(x)))
 
 
 class ImageProgressFeatureExtractor(nn.Module):
@@ -1003,7 +1025,8 @@ class ImageProgressFeatureExtractor(nn.Module):
         self.n_scalars = 4 + self.n_prev_actions * dim_act
         self.feature_dim = feature_dim
 
-        self.frame_encoder = ImageProgressFrameEncoder(in_channels=self.in_channels, out_dim=feature_dim)
+        self.frame_encoder = ImageProgressFrameEncoder(in_channels=self.in_channels, out_dim=feature_dim,
+                                                     input_height=image_shape[1], input_width=image_shape[2])
         self.temporal_encoder = nn.GRU(feature_dim, feature_dim, batch_first=True)
         self.scalar_encoder = nn.Sequential(
             nn.Linear(self.n_scalars, hidden_dim),
@@ -1057,8 +1080,10 @@ class SquashedGaussianImageProgressActor(TorchActorModule):
 
     def forward(self, obs, test=False, with_logprob=True):
         net_out = self.trunk(self.features(obs))
-        mu = self.mu_layer(net_out)
-        log_std = self.log_std_layer(net_out)
+        with torch.autocast(device_type="cuda" if net_out.is_cuda else "cpu", enabled=False):
+            net_out = net_out.float()
+            mu = self.mu_layer(net_out)
+            log_std = self.log_std_layer(net_out)
         log_std = torch.clamp(log_std, LOG_STD_MIN, LOG_STD_MAX)
         std = torch.exp(log_std)
 
@@ -1088,10 +1113,10 @@ class SquashedGaussianImageProgressActor(TorchActorModule):
 
 
 class ImageProgressQFunction(nn.Module):
-    def __init__(self, observation_space, action_space, hidden_sizes=(256, 256), activation=nn.SiLU):
+    def __init__(self, observation_space, action_space, hidden_sizes=(256, 256), activation=nn.SiLU, features=None):
         super().__init__()
         dim_act = action_space.shape[0]
-        self.features = ImageProgressFeatureExtractor(observation_space, action_space)
+        self.features = features if features is not None else ImageProgressFeatureExtractor(observation_space, action_space)
         in_dim = self.features.feature_dim + self.features.scalar_out_dim + dim_act
         self.q = nn.Sequential(
             nn.Linear(in_dim, hidden_sizes[0]),
@@ -1100,21 +1125,25 @@ class ImageProgressQFunction(nn.Module):
             nn.Linear(hidden_sizes[0], hidden_sizes[1]),
             nn.LayerNorm(hidden_sizes[1]),
             activation(),
-            nn.Linear(hidden_sizes[1], 1),
         )
+        self.q_head = nn.Linear(hidden_sizes[1], 1)
 
-    def forward(self, obs, act):
-        x = torch.cat((self.features(obs), act), dim=-1)
-        q = self.q(x)
-        return torch.squeeze(q, -1)
+    def forward(self, obs, act, features=None):
+        if features is None:
+            features = self.features(obs)
+        x = torch.cat((features, act), dim=-1)
+        x = self.q(x)
+        with torch.autocast(device_type="cuda" if x.is_cuda else "cpu", enabled=False):
+            return torch.squeeze(self.q_head(x.float()), -1)
 
 
 class ImageProgressActorCritic(nn.Module):
     def __init__(self, observation_space, action_space, hidden_sizes=(256, 256), activation=nn.SiLU):
         super().__init__()
         self.actor = SquashedGaussianImageProgressActor(observation_space, action_space, hidden_sizes, activation)
-        self.q1 = ImageProgressQFunction(observation_space, action_space, hidden_sizes, activation)
-        self.q2 = ImageProgressQFunction(observation_space, action_space, hidden_sizes, activation)
+        shared_q_features = ImageProgressFeatureExtractor(observation_space, action_space)
+        self.q1 = ImageProgressQFunction(observation_space, action_space, hidden_sizes, activation, features=shared_q_features)
+        self.q2 = ImageProgressQFunction(observation_space, action_space, hidden_sizes, activation, features=shared_q_features)
 
     def act(self, obs, test=False):
         with torch.no_grad():

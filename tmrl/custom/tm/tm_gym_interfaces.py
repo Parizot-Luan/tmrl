@@ -150,7 +150,7 @@ class TM2020Interface(RealTimeGymInterface):
                 raise ValueError(f"Invalid crop: top={top}, bottom={bottom}, height={h}")
             img = img[top:bottom, :, :]
         if self.resize_to is not None:  # cv2.resize takes dim as (width, height)
-            img = cv2.resize(img, self.resize_to)
+            img = cv2.resize(img, self.resize_to, interpolation=cv2.INTER_AREA)
         if self.grayscale:
             img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         else:

@@ -44,9 +44,15 @@ def collate_torch(batch, device=None):
     if isinstance(elem, torch.Tensor):
         # return torch.stack(batch, 0).to(device, non_blocking=non_blocking)
         if elem.numel() < 20000:  # TODO: link to the relevant profiling that lead to this threshold
-            return torch.stack(batch).to(device)
+            stacked = torch.stack(batch)
         else:
-            return torch.stack([b.contiguous().to(device) for b in batch], 0)
+            stacked = torch.stack([b.contiguous() for b in batch], 0)
+        if device is not None:
+            target_device = torch.device(device) if isinstance(device, str) else device
+            if target_device.type == "cuda":
+                stacked = stacked.pin_memory()
+            return stacked.to(target_device, non_blocking=True)
+        return stacked
     elif isinstance(elem, np.ndarray):
         return collate_torch(tuple(torch.from_numpy(b) for b in batch), device)
     elif hasattr(elem, '__torch_tensor__'):
