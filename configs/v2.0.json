@@ -114,8 +114,8 @@
     },
     "IMG_CROP_TOP": 0.35,
     "IMG_CROP_BOTTOM": 0.07,
-    "LINUX_X_OFFSET": 64,
-    "LINUX_Y_OFFSET": 70,
+    "LINUX_X_OFFSET": 56,
+    "LINUX_Y_OFFSET": 8,
     "USE_AMP": true
   },
   "__VERSION__": "0.6.0"
