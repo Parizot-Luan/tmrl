@@ -1,7 +1,6 @@
 import os
 import tarfile
 from pathlib import Path
-import itertools
 
 from torch.optim import Adam
 import numpy as np
@@ -10,6 +9,17 @@ import torch
 from tmrl.config import config_constants as cfg
 from tmrl.util import dump, load
 import logging
+
+
+def _dedupe_q_parameters(model):
+    seen = set()
+    parameters = []
+    for module in (model.q1, model.q2):
+        for parameter in module.parameters():
+            if id(parameter) not in seen:
+                seen.add(id(parameter))
+                parameters.append(parameter)
+    return parameters
 
 
 def load_run_instance_images_dataset(checkpoint_path):
@@ -110,7 +120,8 @@ def update_run_instance(run_instance, training_cls):
             if run_instance.agent.lr_critic != lr_critic:
                 old = run_instance.agent.lr_critic
                 run_instance.agent.lr_critic = lr_critic
-                run_instance.agent.q_optimizer = Adam(itertools.chain(run_instance.agent.model.q1.parameters(), run_instance.agent.model.q2.parameters()), lr=lr_critic)
+                run_instance.agent.q_optimizer = Adam(_dedupe_q_parameters(run_instance.agent.model),
+                                                      lr=lr_critic)
                 logging.info(f"Critic optimizer reinitialized with new lr: {lr_critic} (old lr: {old}).")
 
             if not hasattr(run_instance.agent, "amp_device_type"):

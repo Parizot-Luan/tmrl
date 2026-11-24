@@ -165,8 +165,10 @@ elif platform.system() == "Linux":
             self.process = None
 
         def __del__(self):
-            pass
-            self.sct.close()
+            try:
+                self.sct.close()
+            except Exception:
+                pass
 
         def execute_command(self, c):
             if self.process is None or self.process.poll() is not None:
@@ -175,9 +177,27 @@ elif platform.system() == "Linux":
             self.process.stdin.write(c.encode())
             self.process.stdin.flush()
 
+        def _update_geometry_from_window(self):
+            try:
+                result = subprocess.run(['xdotool', 'getwindowgeometry', '--shell', str(self.window_id)],
+                                        capture_output=True, text=True, check=True)
+                values = {}
+                for line in result.stdout.strip().splitlines():
+                    if '=' in line:
+                        key, value = line.split('=', 1)
+                        values[key] = value
+                self.x = int(values['X'])
+                self.y = int(values['Y'])
+                self.w = int(values['WIDTH'])
+                self.h = int(values['HEIGHT'])
+                logging.debug(f"actual window geometry: x={self.x}, y={self.y}, w={self.w}, h={self.h}")
+            except Exception as e:
+                logging.warning(f"failed to retrieve actual window geometry, keeping requested position: {e}")
+
         def screenshot(self):
             try:
-                monitor = {"top": self.x + self.x_offset, "left": self.y + self.y_offset, "width": self.w, "height": self.h}
+                monitor = {"top": self.y + self.y_offset, "left": self.x + self.x_offset,
+                           "width": self.w, "height": self.h}
                 img = np.array(self.sct.grab(monitor))
                 return img
 
@@ -211,6 +231,7 @@ elif platform.system() == "Linux":
                 # instead of using xdotool --sync, which doesn't return
                 logging.debug(f"success, let me nap 1s to make sure everything computed")
                 time.sleep(1)
+                self._update_geometry_from_window()
 
                 # # retrieve actual position of the window and set offsets
                 # geo_id, geo_x, geo_y, geo_w, geo_h = get_window_geometry(self.window_name)
