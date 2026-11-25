@@ -14,7 +14,7 @@ from tlspyo import Relay, Endpoint
 
 # local imports
 from tmrl.actor import ActorModule
-from tmrl.util import dump, load
+from tmrl.util import dump, load, load_json, save_json
 import tmrl.config.config_constants as cfg
 import tmrl.config.config_objects as cfg_obj
 
@@ -439,6 +439,42 @@ class RolloutWorker:
         self._cur_hist_cpt = 0
         self.model_cpt = 0
 
+        self.best_progress = -1.0
+        self.best_lap_steps = float("inf")
+        self.best_lap_collisions = None
+        self.best_clean_lap_steps = float("inf")
+        base_path = os.path.splitext(self.model_path)[0]
+        self.best_model_path = base_path + "_best.tmod"
+        self.best_progress_path = base_path + "_best.json"
+        self.best_lap_model_path = base_path + "_best_lap.tmod"
+        self.best_lap_path = base_path + "_best_lap.json"
+        self.best_clean_lap_model_path = base_path + "_best_clean.tmod"
+        self.best_clean_lap_path = base_path + "_best_clean.json"
+        if os.path.isfile(self.best_progress_path):
+            try:
+                self.best_progress = float(load_json(self.best_progress_path).get("max_progress", -1.0))
+            except (OSError, ValueError, TypeError):
+                self.best_progress = -1.0
+        if os.path.isfile(self.best_lap_path):
+            try:
+                data = load_json(self.best_lap_path)
+                self.best_lap_steps = int(data["lap_steps"])
+                if "collisions" in data:
+                    self.best_lap_collisions = int(data["collisions"])
+            except (OSError, ValueError, TypeError, KeyError):
+                self.best_lap_steps = float("inf")
+                self.best_lap_collisions = None
+        if os.path.isfile(self.best_clean_lap_path):
+            try:
+                data = load_json(self.best_clean_lap_path)
+                self.best_clean_lap_steps = int(data["lap_steps"])
+            except (OSError, ValueError, TypeError, KeyError):
+                self.best_clean_lap_steps = float("inf")
+        if self.best_lap_steps <= 0:
+            self.best_lap_steps = float("inf")
+        if self.best_clean_lap_steps <= 0:
+            self.best_clean_lap_steps = float("inf")
+
         self.debug_ts_cpt = 0
         self.debug_ts_res_cpt = 0
 
@@ -460,6 +496,73 @@ class RolloutWorker:
                                        deserializer_mode="synchronous")
         else:
             self.__endpoint = None
+
+    def _progress_from_obs(self, obs):
+        """Returns the normalized track progress from a TM20IMAGESPROGRESS observation."""
+        if not cfg.PRAGMA_IMAGE_PROGRESS:
+            return 0.0
+        try:
+            return float(np.asarray(obs[4]).reshape(-1)[0])
+        except (IndexError, TypeError, ValueError):
+            return 0.0
+
+    def _save_best_actor(self, model_path, metadata_path, metadata):
+        try:
+            self.actor.save(model_path)
+            save_json(metadata, metadata_path)
+        except Exception as e:
+            logging.warning(f"Could not save best checkpoint {model_path}: {e}")
+            return False
+        return True
+
+    def _is_better_lap(self, steps, collisions):
+        if steps < self.best_lap_steps:
+            return True
+        return (
+            steps == self.best_lap_steps
+            and self.best_lap_collisions is not None
+            and collisions < self.best_lap_collisions
+        )
+
+    def _update_best_checkpoints(self, max_progress, steps, finished, collisions, lap_time_s):
+        """Saves the actor for new best progress, best lap, or best clean lap."""
+        now = datetime.datetime.now().isoformat()
+        if max_progress > self.best_progress:
+            metadata = {"max_progress": max_progress, "saved_at": now}
+            if self._save_best_actor(self.best_model_path, self.best_progress_path, metadata):
+                self.best_progress = max_progress
+                print_with_timestamp(
+                    f"New best checkpoint: max_progress={max_progress:.5f} -> {self.best_model_path}"
+                )
+        if finished and steps > 0 and self._is_better_lap(steps, collisions):
+            metadata = {
+                "lap_steps": steps,
+                "lap_time_s": lap_time_s,
+                "collisions": collisions,
+                "max_progress": max_progress,
+                "saved_at": now,
+            }
+            if self._save_best_actor(self.best_lap_model_path, self.best_lap_path, metadata):
+                self.best_lap_steps = steps
+                self.best_lap_collisions = collisions
+                print_with_timestamp(
+                    f"New best lap: steps={steps}, time={lap_time_s:.3f}s, "
+                    f"collisions={collisions} -> {self.best_lap_model_path}"
+                )
+        if finished and steps > 0 and collisions == 0 and steps < self.best_clean_lap_steps:
+            metadata = {
+                "lap_steps": steps,
+                "lap_time_s": lap_time_s,
+                "collisions": 0,
+                "max_progress": max_progress,
+                "saved_at": now,
+            }
+            if self._save_best_actor(self.best_clean_lap_model_path, self.best_clean_lap_path, metadata):
+                self.best_clean_lap_steps = steps
+                print_with_timestamp(
+                    f"New best clean lap: steps={steps}, time={lap_time_s:.3f}s -> "
+                    f"{self.best_clean_lap_model_path}"
+                )
 
     def act(self, obs, test=False):
         """
@@ -573,15 +676,36 @@ class RolloutWorker:
 
         ret = 0.0
         steps = 0
+        collisions = 0
+        finished = False
+        lap_time_s = None
         obs, info = self.reset(collect_samples=True)
+        max_progress = self._progress_from_obs(obs)
         for i in iterator:
             obs, rew, terminated, truncated, info = self.step(obs=obs, test=False, collect_samples=True, last_step=i == max_samples - 1)
             ret += rew
             steps += 1
+            max_progress = max(max_progress, self._progress_from_obs(obs))
+            if isinstance(info, dict):
+                collisions += int(bool(info.get("collision", False)))
             if terminated or truncated:
+                info_dict = info if isinstance(info, dict) else {}
+                finished = bool(info_dict.get("end_of_track", False)) or (
+                    terminated and max_progress >= 0.999
+                )
+                try:
+                    race_time = float(info_dict.get("race_time_s"))
+                except (TypeError, ValueError):
+                    race_time = None
+                if race_time is not None and race_time > 0.0:
+                    lap_time_s = race_time
+                else:
+                    dt = cfg.ENV_CONFIG.get("RTGYM_CONFIG", {}).get("time_step_duration", 0.05)
+                    lap_time_s = steps * float(dt)
                 break
         self.buffer.stat_train_return = ret
         self.buffer.stat_train_steps = steps
+        self._update_best_checkpoints(max_progress, steps, finished, collisions, lap_time_s)
 
     def run_episodes(self, max_samples_per_episode=None, nb_episodes=np.inf, train=False):
         """
