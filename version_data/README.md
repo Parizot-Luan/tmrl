@@ -12,8 +12,8 @@ Documentation des versions du projet TMRL.
 
 - `v1.md` : réseau, image, paramètres, résultats et restauration V1.
 - `v1.1.md` : expérience abandonnée, changements de reward.
-- `v2.md` : version active, crop 40 %/7 %, image 48×48, AMP et correction des replays.
-- `v2.1.5-changements.md` : détail et justification des changements depuis `v2.1.4`.
+- `v2.md` : version active, crop 25 %/7 %, image 96×32, AMP et correction des replays.
+- `v2.1.5-changements.md` : historique complet des observations et changements depuis `v2.0.0`.
 
 ## Principe
 
