@@ -54,7 +54,7 @@
     "GAMMA": 0.995,
     "POLYAK": 0.995,
     "TARGET_ENTROPY": -0.5,
-    "ALPHA": 0.04,
+    "ALPHA": 0.02,
     "REDQ_N": 10,
     "REDQ_M": 2,
     "REDQ_Q_UPDATES_PER_POLICY_UPDATE": 20,
